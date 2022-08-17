@@ -50,6 +50,11 @@ class KeycloakSyncMixin(models.AbstractModel):
         default='username:login',
     )
 
+    send_password_email = fields.Boolean(
+        related='provider_id.send_password_email',
+        readonly=True,
+    )
+
     def _validate_setup(self):
         """Make sure we are ready to talk to Keycloak."""
         self.ensure_one()
@@ -75,7 +80,6 @@ class KeycloakSyncMixin(models.AbstractModel):
     def _get_token(self):
         """Retrieve auth token from Keycloak."""
         url = self.provider_id.validation_endpoint.replace('/introspect', '')
-        logger.info('Calling %s' % url)
         headers = {'content-type': 'application/x-www-form-urlencoded'}
         data = {
             'username': self.user,
@@ -94,7 +98,6 @@ class KeycloakSyncMixin(models.AbstractModel):
         :param token: a valida auth token from Keycloak
         :param **params: extra search params for users endpoint
         """
-        logger.info('Calling %s' % self.endpoint)
         headers = {
             'Authorization': 'Bearer %s' % token,
         }
@@ -137,11 +140,9 @@ class KeycloakSyncWiz(models.TransientModel):
         4. update them w/ their own Keycloak ID
         5. get back to filtered list of updated users
         """
-        logger.info('Sync keycloak users START')
         self._validate_setup()
         token = self._get_token()
-        users = self._get_users(token)
-        logger.info('Found %s Keycloak users' % len(users))
+        users = self._get_users(token, max=-1)
         # map users by match key
         keycloak_key, odoo_key = self.login_match_key.split(':')
         logins_mapping = {
@@ -151,7 +152,6 @@ class KeycloakSyncWiz(models.TransientModel):
         logins = list(logins_mapping.keys())
         # find matching odoo users
         odoo_users = self._get_odoo_users(logins)
-        logger.info('Matching %s Odoo users' % len(odoo_users))
         # update odoo users
         for user in odoo_users:
             # use `mapped` since we cann acces nested records
@@ -165,7 +165,6 @@ class KeycloakSyncWiz(models.TransientModel):
         # open users' tree view
         action = self.env.ref('base.action_res_users').read()[0]
         action['domain'] = [('id', 'in', odoo_users.ids)]
-        logger.info('Sync keycloak users STOP')
         return action
 
 
@@ -238,6 +237,7 @@ class KeycloakCreateWiz(models.TransientModel):
         values = {
             'username': odoo_user.login,
             'email': odoo_user.email,
+            'enabled': True,
         }
         if 'firstname' in odoo_user.partner_id:
             # partner_firstname installed
@@ -249,7 +249,6 @@ class KeycloakCreateWiz(models.TransientModel):
             'firstName': firstname,
             'lastName': lastname,
         })
-        logger.debug('CREATE using values %s' % str(values))
         return values
 
     def _split_user_fullname(self, odoo_user):
@@ -266,7 +265,6 @@ class KeycloakCreateWiz(models.TransientModel):
 
     def _create_user(self, token, **data):
         """Create a user on Keycloak w/ given data."""
-        logger.info('CREATE Calling %s' % self.endpoint)
         headers = {
             'Authorization': 'Bearer %s' % token,
         }
@@ -279,6 +277,15 @@ class KeycloakCreateWiz(models.TransientModel):
         # so we are forced to do anothe call to get its data :(
         return self._get_users(token, search=data['username'])[0]
 
+    def _send_password_mail(self, token, uuid):
+        """Sends email carrying a link to set password for newly created user."""
+        url = self.endpoint + "/" + uuid + "/execute-actions-email"
+        headers = {
+            'Authorization': 'Bearer %s' % token,
+        }
+        resp = requests.put(url, headers=headers, json=['UPDATE_PASSWORD'])
+        self._validate_response(resp, no_json=True)
+
     @api.multi
     def button_create_user(self):
         """Create users on Keycloak.
@@ -290,7 +297,6 @@ class KeycloakCreateWiz(models.TransientModel):
            b. they do not have an Oauth UID already
         4. brings you to update users list
         """
-        logger.debug('Create keycloak user START')
         self._validate_setup()
         token = self._get_token()
         logger.info(
@@ -305,7 +311,12 @@ class KeycloakCreateWiz(models.TransientModel):
                 'oauth_uid': keycloak_user['id'],
                 'oauth_provider_id': self.provider_id.id,
             })
+
+            # Send Reset Password Link
+            if self.send_password_email:
+                self._send_password_mail(token, uuid=keycloak_user['id'])
+
         action = self.env.ref('base.action_res_users').read()[0]
         action['domain'] = [('id', 'in', self.user_ids.ids)]
-        logger.debug('Create keycloak users STOP')
         return action
+
