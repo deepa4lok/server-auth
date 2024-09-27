@@ -26,7 +26,7 @@ class OAuthProvider(models.Model):
     users_management_enabled = fields.Boolean(
         compute='_compute_users_management_enabled'
     )
-    send_password_email = fields.Boolean("Email password reset link?", default=False)
+    send_password_email = fields.Boolean("Send Email password reset link from provider?", default=False)
 
     @api.depends(
         'enabled',
